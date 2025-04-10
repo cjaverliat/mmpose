@@ -7,10 +7,13 @@ from collections import defaultdict
 from typing import (Callable, Dict, Generator, Iterable, List, Optional,
                     Sequence, Tuple, Union)
 
+from mmpose.datasets.transforms import LoadImage
+
 import cv2
 import mmcv
 import mmengine
 import numpy as np
+import torch
 import torch.nn as nn
 from mmengine.config import Config, ConfigDict
 from mmengine.dataset import Compose
@@ -36,7 +39,7 @@ except (ImportError, ModuleNotFoundError):
     has_mmdet = False
 
 InstanceList = List[InstanceData]
-InputType = Union[str, np.ndarray]
+InputType = Union[str, np.ndarray, torch.Tensor]
 InputsType = Union[InputType, Sequence[InputType]]
 PredType = Union[InstanceData, InstanceList]
 ImgType = Union[np.ndarray, Sequence[np.ndarray]]
@@ -209,7 +212,7 @@ class BaseMMPoseInferencer(BaseInferencer):
                                      f'or folder, but received {inputs} of '
                                      f'type {input_type}.')
 
-        elif isinstance(inputs, np.ndarray):
+        if not isinstance(inputs, (list, tuple)):
             inputs = [inputs]
 
         return inputs
@@ -302,7 +305,30 @@ class BaseMMPoseInferencer(BaseInferencer):
         scope = cfg.get('default_scope', 'mmpose')
         if scope is not None:
             init_default_scope(scope)
-        return Compose(cfg.test_dataloader.dataset.pipeline)
+
+        pipeline_cfg = cfg.test_dataloader.dataset.pipeline
+
+        # Swap mmpose LoadImage with mmcv.LoadImage to support torch tensor inputs
+        load_img_idx = self._get_transform_idx(
+            pipeline_cfg, ('LoadImage', LoadImage))
+        if load_img_idx == -1:
+            raise ValueError(
+                'LoadImage is not found in the test pipeline')
+
+        pipeline_cfg[load_img_idx]['type'] = 'mmcv.LoadImage'
+
+        return Compose(pipeline_cfg)
+
+    def _get_transform_idx(self, pipeline_cfg: ConfigType,
+                           name: Union[str, Tuple[str, type]]) -> int:
+        """Returns the index of the transform in a pipeline.
+
+        If the transform is not found, returns -1.
+        """
+        for i, transform in enumerate(pipeline_cfg):
+            if transform['type'] in name:
+                return i
+        return -1
 
     def update_model_visualizer_settings(self, **kwargs):
         """Update the settings of models and visualizer according to inference
