@@ -534,6 +534,9 @@ class BaseMMPoseInferencer(BaseInferencer):
                 img = mmcv.imread(single_input, channel_order='rgb')
             elif isinstance(single_input, np.ndarray):
                 img = mmcv.bgr2rgb(single_input)
+            elif isinstance(single_input, torch.Tensor):
+                img = single_input.detach().cpu().numpy()
+                img = mmcv.bgr2rgb(img)
             else:
                 raise ValueError('Unsupported input type: '
                                  f'{type(single_input)}')

@@ -5,10 +5,11 @@ import cv2
 import numpy as np
 from mmcv.transforms import BaseTransform
 from mmengine import is_seq_of
+import torch
 
 from mmpose.registry import TRANSFORMS
-from mmpose.structures.bbox import get_udp_warp_matrix, get_warp_matrix
-
+from mmpose.structures.bbox import get_udp_warp_matrix, get_warp_matrix, get_udp_warp_matrix_pt, get_warp_matrix_pt
+from mmcv.utils.math import warp_affine as warp_affine_pt
 
 @TRANSFORMS.register_module()
 class TopdownAffine(BaseTransform):
@@ -101,21 +102,57 @@ class TopdownAffine(BaseTransform):
         else:
             rot = 0.
 
-        if self.use_udp:
-            warp_mat = get_udp_warp_matrix(
-                center, scale, rot, output_size=(w, h))
-        else:
-            warp_mat = get_warp_matrix(center, scale, rot, output_size=(w, h))
+        img = results['img']
 
-        if isinstance(results['img'], list):
-            results['img'] = [
-                cv2.warpAffine(
-                    img, warp_mat, warp_size, flags=cv2.INTER_LINEAR)
-                for img in results['img']
-            ]
-        else:
-            results['img'] = cv2.warpAffine(
-                results['img'], warp_mat, warp_size, flags=cv2.INTER_LINEAR)
+        if isinstance(img, np.ndarray) or is_seq_of(img, np.ndarray):
+            if self.use_udp:
+                warp_mat = get_udp_warp_matrix(
+                    center, scale, rot, output_size=(w, h))
+            else:
+                warp_mat = get_warp_matrix(center, scale, rot, output_size=(w, h))
+
+            if isinstance(results['img'], (list, tuple)):
+                results['img'] = [
+                    cv2.warpAffine(
+                        img, warp_mat, warp_size, flags=cv2.INTER_LINEAR)
+                    for img in results['img']
+                ]
+            else:
+                results['img'] = cv2.warpAffine(
+                    results['img'], warp_mat, warp_size, flags=cv2.INTER_LINEAR)
+                
+        elif isinstance(img, torch.Tensor) or is_seq_of(img, torch.Tensor):
+            
+            device = img.device if isinstance(img, torch.Tensor) else img[0].device
+            center = torch.as_tensor(center, device=device)
+            scale = torch.as_tensor(scale, device=device)
+
+            if self.use_udp:
+                warp_mat = get_udp_warp_matrix_pt(
+                    center, scale, rot, output_size=(w, h))
+            else:
+                warp_mat = get_warp_matrix_pt(center, scale, rot, output_size=(w, h))
+
+            if isinstance(results['img'], (list, tuple)):
+                results['img'] = [
+                    warp_affine_pt(
+                        img.permute(2, 0, 1),
+                        affine_mtx=warp_mat,
+                        dst_size=warp_size[::-1],
+                        interpolation="bilinear"
+                    ).permute(1, 2, 0)
+                    for img in results['img']
+                ]
+            else:
+                results['img'] = warp_affine_pt(
+                    results['img'].permute(2, 0, 1),
+                    affine_mtx=warp_mat,
+                    dst_size=warp_size[::-1],
+                    interpolation="bilinear"
+                ).permute(1, 2, 0)
+        
+            center = center.cpu().numpy()
+            scale = scale.cpu().numpy()
 
         if results.get('keypoints', None) is not None:
             if results.get('transformed_keypoints', None) is not None:

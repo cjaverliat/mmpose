@@ -4,6 +4,9 @@ from typing import Tuple
 
 import cv2
 import numpy as np
+import torch
+
+from mmcv.utils.math import get_affine_matrix as get_affine_matrix_pt
 
 
 def bbox_xyxy2xywh(bbox_xyxy: np.ndarray) -> np.ndarray:
@@ -522,4 +525,197 @@ def _get_3rd_point(a: np.ndarray, b: np.ndarray):
     """
     direction = a - b
     c = b + np.r_[-direction[1], direction[0]]
+    return c
+
+
+def bbox_xyxy2cs_pt(
+    bbox: torch.Tensor, padding: float = 1.0
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Transform the bbox format from (x,y,w,h) into (center, scale)
+
+    Args:
+        bbox (torch.Tensor): Bounding box(es) in shape (4,) or (n, 4), formatted
+            as (left, top, right, bottom)
+        padding (float): BBox padding factor that will be multiplied to scale.
+            Default: 1.0
+
+    Returns:
+        tuple: A tuple containing center and scale.
+        - torch.Tensor[float32]: Center (x, y) of the bbox in shape (2,) or
+            (n, 2)
+        - torch.Tensor[float32]: Scale (w, h) of the bbox in shape (2,) or
+            (n, 2)
+    """
+    # convert single bbox from (4, ) to (1, 4)
+    dim = bbox.ndimension()
+    if dim == 1:
+        bbox = bbox.unsqueeze(0)
+
+    scale = (bbox[..., 2:] - bbox[..., :2]) * padding
+    center = (bbox[..., 2:] + bbox[..., :2]) * 0.5
+
+    if dim == 1:
+        center = center[0]
+        scale = scale[0]
+
+    return center, scale
+
+
+def get_udp_warp_matrix_pt(
+    center: torch.Tensor,
+    scale: torch.Tensor,
+    rot: float,
+    output_size: Tuple[int, int],
+) -> torch.Tensor:
+    """Calculate the affine transformation matrix under the unbiased
+    constraint. See `UDP (CVPR 2020)`_ for details.
+
+    Note:
+
+        - The bbox number: N
+
+    Args:
+        center (torch.Tensor[2, ]): Center of the bounding box (x, y).
+        scale (torch.Tensor[2, ]): Scale of the bounding box
+            wrt [width, height].
+        rot (float): Rotation angle (degree).
+        output_size (tuple): Size ([w, h]) of the output image
+
+    Returns:
+        torch.Tensor: A 2x3 transformation matrix
+
+    .. _`UDP (CVPR 2020)`: https://arxiv.org/abs/1911.07524
+    """
+    assert center.shape[0] == 2
+    assert scale.shape[0] == 2
+    assert len(output_size) == 2
+
+    input_size = center * 2
+    rot_rad = math.radians(rot)
+    warp_mat = torch.zeros((2, 3), dtype=torch.float32)
+    scale_x = (output_size[0] - 1) / scale[0]
+    scale_y = (output_size[1] - 1) / scale[1]
+    warp_mat[0, 0] = math.cos(rot_rad) * scale_x
+    warp_mat[0, 1] = -math.sin(rot_rad) * scale_x
+    warp_mat[0, 2] = scale_x * (
+        -0.5 * input_size[0] * math.cos(rot_rad)
+        + 0.5 * input_size[1] * math.sin(rot_rad)
+        + 0.5 * scale[0]
+    )
+    warp_mat[1, 0] = math.sin(rot_rad) * scale_y
+    warp_mat[1, 1] = math.cos(rot_rad) * scale_y
+    warp_mat[1, 2] = scale_y * (
+        -0.5 * input_size[0] * math.sin(rot_rad)
+        - 0.5 * input_size[1] * math.cos(rot_rad)
+        + 0.5 * scale[1]
+    )
+    return warp_mat
+
+
+def get_warp_matrix_pt(
+    center: torch.Tensor,
+    scale: torch.Tensor,
+    rot: float,
+    output_size: Tuple[int, int],
+    shift: Tuple[float, float] = (0.0, 0.0),
+    inv: bool = False,
+    fix_aspect_ratio: bool = True,
+) -> torch.Tensor:
+    """Calculate the affine transformation matrix that can warp the bbox area
+    in the input image to the output size.
+
+    Args:
+        center (torch.Tensor[2, ]): Center of the bounding box (x, y).
+        scale (torch.Tensor[2, ]): Scale of the bounding box
+            wrt [width, height].
+        rot (float): Rotation angle (degree).
+        output_size (Tuple[int, int]): Size of the
+            destination heatmaps.
+        shift (Tuple[float, float]): Shift translation ratio wrt the width/height.
+            Default (0.0, 0.0).
+        inv (bool): Option to inverse the affine transform direction.
+            (inv=False: src->dst or inv=True: dst->src)
+        fix_aspect_ratio (bool): Whether to fix aspect ratio during transform.
+            Defaults to True.
+
+    Returns:
+        torch.Tensor: A 2x3 transformation matrix
+    """
+    assert len(center) == 2
+    assert len(scale) == 2
+    assert len(output_size) == 2
+    assert len(shift) == 2
+
+    shift = torch.tensor(shift, dtype=torch.float32, device=center.device)
+
+    src_w, src_h = scale[:2]
+    dst_w, dst_h = output_size[:2]
+
+    rot_rad = math.radians(rot)
+    src_dir = _rotate_point_pt(
+        torch.tensor([src_w * -0.5, 0.0], device=center.device), rot_rad
+    )
+    dst_dir = torch.tensor([dst_w * -0.5, 0.0], device=center.device)
+
+    src = torch.zeros((3, 2), dtype=torch.float32, device=center.device)
+    src[0, :] = center + scale * shift
+    src[1, :] = center + src_dir + scale * shift
+
+    dst = torch.zeros((3, 2), dtype=torch.float32, device=center.device)
+    dst[0, :] = torch.tensor([dst_w * 0.5, dst_h * 0.5], device=center.device)
+    dst[1, :] = torch.tensor([dst_w * 0.5, dst_h * 0.5], device=center.device) + dst_dir
+
+    if fix_aspect_ratio:
+        src[2, :] = _get_3rd_point_pt(src[0, :], src[1, :])
+        dst[2, :] = _get_3rd_point_pt(dst[0, :], dst[1, :])
+    else:
+        src_dir_2 = _rotate_point_pt(
+            torch.tensor([0.0, src_h * -0.5], device=center.device), rot_rad
+        )
+        dst_dir_2 = torch.tensor([0.0, dst_h * -0.5], device=center.device)
+        src[2, :] = center + src_dir_2 + scale * shift
+        dst[2, :] = (
+            torch.tensor([dst_w * 0.5, dst_h * 0.5], device=center.device) + dst_dir_2
+        )
+
+    if inv:
+        warp_mat = get_affine_matrix_pt(dst, src)
+    else:
+        warp_mat = get_affine_matrix_pt(src, dst)
+    return warp_mat
+
+
+def _rotate_point_pt(pt: torch.Tensor, angle_rad: float) -> torch.Tensor:
+    """Rotate a point by an angle.
+
+    Args:
+        pt (torch.Tensor): 2D point coordinates (x, y) in shape (2, )
+        angle_rad (float): rotation angle in radian
+
+    Returns:
+        torch.Tensor: Rotated point in shape (2, )
+    """
+    sn, cs = math.sin(angle_rad), math.cos(angle_rad)
+    rot_mat = torch.tensor([[cs, -sn], [sn, cs]], dtype=torch.float32, device=pt.device)
+    return torch.matmul(rot_mat, pt)
+
+
+def _get_3rd_point_pt(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """To calculate the affine matrix, three pairs of points are required. This
+    function is used to get the 3rd point, given 2D points a & b.
+
+    The 3rd point is defined by rotating vector `a - b` by 90 degrees
+    anticlockwise, using b as the rotation center.
+
+    Args:
+        a (torch.Tensor): The 1st point (x,y) in shape (2, )
+        b (torch.Tensor): The 2nd point (x,y) in shape (2, )
+
+    Returns:
+        torch.Tensor: The 3rd point.
+    """
+    direction = a - b
+    c = b + torch.tensor(
+        [-direction[1], direction[0]], dtype=torch.float32, device=a.device
+    )
     return c
