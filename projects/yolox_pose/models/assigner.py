@@ -133,7 +133,7 @@ class PoseSimOTAAssigner(SimOTAAssigner):
             valid_pred_scores = valid_pred_scores.unsqueeze(1).repeat(
                 1, num_gt, 1)
             # disable AMP autocast to avoid overflow
-            with torch.cuda.amp.autocast(enabled=False):
+            with torch.amp.autocast("cuda", enabled=False):
                 cls_cost = (
                     F.binary_cross_entropy(
                         valid_pred_scores.to(dtype=torch.float32),
@@ -148,7 +148,7 @@ class PoseSimOTAAssigner(SimOTAAssigner):
                 1).repeat(1, num_gt, 1)  # [num_valid, 1, k]
             gt_kpt_vis = gt_keypoints_visible.unsqueeze(
                 0).float()  # [1, num_gt, k]
-            with torch.cuda.amp.autocast(enabled=False):
+            with torch.amp.autocast("cuda", enabled=False):
                 vis_cost = (
                     F.binary_cross_entropy(
                         valid_pred_kpts_vis.to(dtype=torch.float32),
