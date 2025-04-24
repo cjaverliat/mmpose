@@ -128,6 +128,66 @@ class Pose2DInferencer(BaseMMPoseInferencer):
             self.visualizer.set_dataset_meta(self.model.dataset_meta,
                                              skeleton_style)
 
+    def preprocess_batch(self, inputs: InputsType, batch_size: int,
+                          bbox_thr: float = 0.3,
+                          nms_thr: float = 0.3,
+                          bboxes: Union[List[List], List[np.ndarray],
+                                        np.ndarray] = []):
+        assert isinstance(inputs, torch.Tensor), "Inputs must be a torch.Tensor"
+        assert batch_size == inputs.shape[0], f"Batch size {batch_size} does not match number of images {inputs.shape[0]}"
+
+        data_infos = []
+
+        for i in range(batch_size):
+            data_info = dict(img=inputs[i], img_path=f'{i}.jpg'.rjust(10, '0'))
+            data_info.update(self.model.dataset_meta)
+            data_infos.append(data_info)
+
+        # bottom-up
+        if self.cfg.data_mode != 'topdown':
+            return [self.pipeline(data_info) for data_info in data_infos]
+
+        if self.detector is not None:
+            
+            # Overwrite bboxes with detector results
+            bboxes = [[] for _ in range(batch_size)]
+
+            det_results = self.detector(inputs, return_datasamples=True, batch_size=batch_size)['predictions']
+            
+            # TODO: this can probably be batched as well
+            for i, result in enumerate(det_results):
+                pred_instance = result.pred_instances.cpu().numpy()
+                bboxes[i] = np.concatenate(
+                    (pred_instance.bboxes, pred_instance.scores[:, None]),
+                    axis=1)
+
+                label_mask = np.zeros(len(bboxes[i]), dtype=np.uint8)
+                for cat_id in self.det_cat_ids:
+                    label_mask = np.logical_or(label_mask,
+                                                pred_instance.labels == cat_id)
+
+                bboxes[i] = bboxes[i][np.logical_and(
+                    label_mask, pred_instance.scores > bbox_thr)]
+                bboxes[i] = bboxes[i][nms(bboxes[i], nms_thr)]
+
+        new_data_infos = []
+
+        for i in range(batch_size):
+            if len(bboxes[i]) > 0:
+                for bbox in bboxes[i]:
+                    inst = data_infos[i].copy()
+                    inst['bbox'] = bbox[None, :4]
+                    inst['bbox_score'] = bbox[4:5]
+                    new_data_infos.append(self.pipeline(inst))
+            else:
+                inst = data_infos[i].copy()
+                _, h, w, _ = inputs[i].shape
+                inst['bbox'] = np.array([[0, 0, w, h]], dtype=np.float32)
+                inst['bbox_score'] = np.ones(1, dtype=np.float32)
+                new_data_infos.append(self.pipeline(inst))
+
+        return new_data_infos
+
     def preprocess_single(self,
                           input: InputType,
                           index: int,

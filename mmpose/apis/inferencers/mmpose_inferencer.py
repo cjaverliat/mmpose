@@ -188,6 +188,9 @@ class MMPoseInferencer(BaseMMPoseInferencer):
                 warnings.warn('The display mode is closed when using webcam '
                               'input. It will be turned on automatically.')
             visualize_kwargs['show'] = True
+        elif isinstance(inputs, torch.Tensor) and inputs.ndim == 4:
+            # Batch of images, keep as is.
+            assert batch_size == inputs.shape[0], f"Batch size {batch_size} does not match number of images {inputs.shape[0]}"
         else:
             inputs = self.inferencer._inputs_to_list(inputs)
         self._video_input = self.inferencer._video_input
