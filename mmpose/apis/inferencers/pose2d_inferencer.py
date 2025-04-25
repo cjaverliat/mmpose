@@ -132,7 +132,7 @@ class Pose2DInferencer(BaseMMPoseInferencer):
                           bbox_thr: float = 0.3,
                           nms_thr: float = 0.3,
                           bboxes: Union[List[List], List[np.ndarray],
-                                        np.ndarray] = []):
+                                        np.ndarray] | None = None):
         assert isinstance(inputs, torch.Tensor), "Inputs must be a torch.Tensor"
         assert batch_size == inputs.shape[0], f"Batch size {batch_size} does not match number of images {inputs.shape[0]}"
 
@@ -147,11 +147,16 @@ class Pose2DInferencer(BaseMMPoseInferencer):
         if self.cfg.data_mode != 'topdown':
             return [self.pipeline(data_info) for data_info in data_infos]
 
+        if self.detector is None and bboxes is None:
+            bboxes = [[] for _ in range(batch_size)]
+            # Use the whole image as bbox
+            for i in range(batch_size):
+                h, w, _ = inputs[i].shape
+                bboxes[i] = np.array([[0, 0, w, h, 1]], dtype=np.float32)
+        
         if self.detector is not None:
-            
             # Overwrite bboxes with detector results
             bboxes = [[] for _ in range(batch_size)]
-
             det_results = self.detector(inputs, return_datasamples=True, batch_size=batch_size)['predictions']
             
             # TODO: this can probably be batched as well
