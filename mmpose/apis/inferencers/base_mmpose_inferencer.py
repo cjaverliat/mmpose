@@ -492,6 +492,9 @@ class BaseMMPoseInferencer(BaseInferencer):
                     level=logging.WARNING,
                 )
             visualize_kwargs["show"] = True
+        elif isinstance(inputs, torch.Tensor) and inputs.ndim == 4:
+            # Batch of images, keep as is.
+            assert batch_size == inputs.shape[0], f"Batch size {batch_size} does not match number of images {inputs.shape[0]}"
         else:
             inputs = self._inputs_to_list(inputs)
 
