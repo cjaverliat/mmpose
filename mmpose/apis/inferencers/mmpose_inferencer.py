@@ -180,19 +180,8 @@ class MMPoseInferencer(BaseMMPoseInferencer):
 
         self.inferencer.update_model_visualizer_settings(**kwargs)
 
-        # preprocessing
-        if isinstance(inputs, str) and inputs.startswith('webcam'):
-            inputs = self.inferencer._get_webcam_inputs(inputs)
-            batch_size = 1
-            if not visualize_kwargs.get('show', False):
-                warnings.warn('The display mode is closed when using webcam '
-                              'input. It will be turned on automatically.')
-            visualize_kwargs['show'] = True
-        elif isinstance(inputs, torch.Tensor) and inputs.ndim == 4:
-            # Batch of images, keep as is.
-            assert batch_size == inputs.shape[0], f"Batch size {batch_size} does not match number of images {inputs.shape[0]}"
-        else:
-            inputs = self.inferencer._inputs_to_list(inputs)
+        inputs, batch_size, visualize_kwargs = self.inferencer.prepare_inputs(inputs, batch_size=batch_size, visualize_kwargs=visualize_kwargs)
+
         self._video_input = self.inferencer._video_input
         if self._video_input:
             self.video_info = self.inferencer.video_info

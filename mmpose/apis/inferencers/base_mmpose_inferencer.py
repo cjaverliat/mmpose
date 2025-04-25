@@ -438,6 +438,34 @@ class BaseMMPoseInferencer(BaseInferencer):
                 # only supports inference with batch size 1
                 yield self.collate_fn(data_infos), [input]
 
+    def prepare_inputs(self, inputs: InputsType, batch_size: int, visualize_kwargs: dict) -> InputsType:
+
+        visualize_kwargs = visualize_kwargs.copy()
+
+        if isinstance(inputs, str) and inputs.startswith("webcam"):
+            inputs = self._get_webcam_inputs(inputs)
+            batch_size = 1
+            if not visualize_kwargs.get("show", False):
+                print_log(
+                    "The display mode is closed when using webcam "
+                    "input. It will be turned on automatically.",
+                    logger="current",
+                    level=logging.WARNING,
+                )
+            visualize_kwargs["show"] = True
+        elif isinstance(inputs, torch.Tensor):
+            if inputs.ndim == 4:
+                # Batch of images, keep as is.
+                assert batch_size == inputs.shape[0], f"Batch size {batch_size} does not match number of images {inputs.shape[0]}"
+            elif inputs.ndim == 3:
+                inputs = inputs.unsqueeze(0)
+            else:
+                raise ValueError(f"Expected input to be a 3D or 4D tensor, but got {inputs.shape}")
+        else:
+            inputs = self._inputs_to_list(inputs)
+
+        return inputs, batch_size, visualize_kwargs
+
     def __call__(
         self,
         inputs: InputsType,
@@ -480,23 +508,7 @@ class BaseMMPoseInferencer(BaseInferencer):
 
         self.update_model_visualizer_settings(**kwargs)
 
-        # preprocessing
-        if isinstance(inputs, str) and inputs.startswith("webcam"):
-            inputs = self._get_webcam_inputs(inputs)
-            batch_size = 1
-            if not visualize_kwargs.get("show", False):
-                print_log(
-                    "The display mode is closed when using webcam "
-                    "input. It will be turned on automatically.",
-                    logger="current",
-                    level=logging.WARNING,
-                )
-            visualize_kwargs["show"] = True
-        elif isinstance(inputs, torch.Tensor) and inputs.ndim == 4:
-            # Batch of images, keep as is.
-            assert batch_size == inputs.shape[0], f"Batch size {batch_size} does not match number of images {inputs.shape[0]}"
-        else:
-            inputs = self._inputs_to_list(inputs)
+        inputs, batch_size, visualize_kwargs = self.prepare_inputs(inputs, batch_size=batch_size, visualize_kwargs=visualize_kwargs)
 
         # check the compatibility between inputs/outputs
         if not self._video_input and len(inputs) > 0:
