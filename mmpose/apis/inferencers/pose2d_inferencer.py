@@ -186,9 +186,9 @@ class Pose2DInferencer(BaseMMPoseInferencer):
                     new_data_infos.append(self.pipeline(inst))
             else:
                 inst = data_infos[i].copy()
-                _, h, w, _ = inputs[i].shape
+                h, w, _ = inputs[i].shape
                 inst['bbox'] = np.array([[0, 0, w, h]], dtype=np.float32)
-                inst['bbox_score'] = np.ones(1, dtype=np.float32)
+                inst['bbox_score'] = np.zeros(1, dtype=np.float32)
                 new_data_infos.append(self.pipeline(inst))
 
         return new_data_infos
