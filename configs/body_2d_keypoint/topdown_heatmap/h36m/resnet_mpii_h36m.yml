@@ -1,0 +1,11 @@
+Models:
+- Config: configs/body_2d_keypoint/topdown_heatmap/h36m/td-hm_res152_mpii_h36m-384x384.py
+  In Collection: PoseResNet
+  Metadata:
+    Architecture:
+    - ResNet
+    Training Data:
+    - MPII
+    - Human3.6M
+  Name: td-hm_res152_mpii_h36m-384x384
+  Weights: None

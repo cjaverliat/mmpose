@@ -94,6 +94,7 @@ Import:
 - configs/face_2d_keypoint/rtmpose/face6/rtmpose_face6.yml
 - configs/face_2d_keypoint/rtmpose/lapa/rtmpose_lapa.yml
 - configs/face_2d_keypoint/rtmpose/wflw/rtmpose_wflw.yml
+- configs/body_2d_keypoint/topdown_heatmap/h36m/resnet_mpii_h36m.yml
 - configs/face_2d_keypoint/topdown_heatmap/300w/hrnetv2_300w.yml
 - configs/face_2d_keypoint/topdown_heatmap/300wlp/hrnetv2_300wlp.yml
 - configs/face_2d_keypoint/topdown_heatmap/aflw/hrnetv2_aflw.yml
