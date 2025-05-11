@@ -18,6 +18,8 @@ from typing import (
 from abc import abstractmethod
 from mmpose.datasets.transforms import LoadImage
 
+from mmpose.structures.utils import merge_data_samples
+
 import cv2
 import mmcv
 import mmengine
@@ -606,7 +608,25 @@ class BaseMMPoseInferencer(BaseInferencer):
 
         results = []
 
-        for single_input, pred in zip(inputs, preds):
+        # Merge data samples based on img_path
+        unique_img_paths = set([result.metainfo["img_path"] for result in preds])
+        # Order numerically
+        unique_img_paths = sorted(unique_img_paths, key=lambda x: int(x.split(".")[0]))
+
+        merged_preds = []
+
+        for img_path in unique_img_paths:
+            merged_preds.append(
+                merge_data_samples(
+                    [
+                        result
+                        for result in preds
+                        if result.metainfo["img_path"] == img_path
+                    ]
+                )
+            )
+
+        for single_input, pred in zip(inputs, merged_preds):
             if isinstance(single_input, str):
                 img = mmcv.imread(single_input, channel_order="rgb")
             elif isinstance(single_input, np.ndarray):
