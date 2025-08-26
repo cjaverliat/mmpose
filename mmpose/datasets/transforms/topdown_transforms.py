@@ -6,10 +6,20 @@ import numpy as np
 from mmcv.transforms import BaseTransform
 from mmengine import is_seq_of
 import torch
+from math import floor, ceil
 
 from mmpose.registry import TRANSFORMS
-from mmpose.structures.bbox import get_udp_warp_matrix, get_warp_matrix, get_udp_warp_matrix_pt, get_warp_matrix_pt
+from mmpose.structures.bbox import (
+    get_udp_warp_matrix,
+    get_warp_matrix,
+    get_udp_warp_matrix_pt,
+    get_warp_matrix_pt,
+    bbox_cs2xyxy,
+)
 from mmcv.utils.math import warp_affine as warp_affine_pt
+from torchvision.transforms.functional import resize as resize_pt
+from torchvision.transforms import InterpolationMode
+
 
 @TRANSFORMS.register_module()
 class TopdownAffine(BaseTransform):
@@ -42,13 +52,12 @@ class TopdownAffine(BaseTransform):
     .. _`UDP (CVPR 2020)`: https://arxiv.org/abs/1911.07524
     """
 
-    def __init__(self,
-                 input_size: Tuple[int, int],
-                 use_udp: bool = False) -> None:
+    def __init__(self, input_size: Tuple[int, int], use_udp: bool = False) -> None:
         super().__init__()
 
-        assert is_seq_of(input_size, int) and len(input_size) == 2, (
-            f'Invalid input_size {input_size}')
+        assert (
+            is_seq_of(input_size, int) and len(input_size) == 2
+        ), f"Invalid input_size {input_size}"
 
         self.input_size = input_size
         self.use_udp = use_udp
@@ -66,9 +75,11 @@ class TopdownAffine(BaseTransform):
         """
 
         w, h = np.hsplit(bbox_scale, [1])
-        bbox_scale = np.where(w > h * aspect_ratio,
-                              np.hstack([w, w / aspect_ratio]),
-                              np.hstack([h * aspect_ratio, h]))
+        bbox_scale = np.where(
+            w > h * aspect_ratio,
+            np.hstack([w, w / aspect_ratio]),
+            np.hstack([h * aspect_ratio, h]),
+        )
         return bbox_scale
 
     def transform(self, results: Dict) -> Optional[dict]:
@@ -87,89 +98,149 @@ class TopdownAffine(BaseTransform):
         warp_size = (int(w), int(h))
 
         # reshape bbox to fixed aspect ratio
-        results['bbox_scale'] = self._fix_aspect_ratio(
-            results['bbox_scale'], aspect_ratio=w / h)
+        results["bbox_scale"] = self._fix_aspect_ratio(
+            results["bbox_scale"], aspect_ratio=w / h
+        )
 
         # TODO: support multi-instance
-        assert results['bbox_center'].shape[0] == 1, (
-            'Top-down heatmap only supports single instance. Got invalid '
-            f'shape of bbox_center {results["bbox_center"].shape}.')
+        assert results["bbox_center"].shape[0] == 1, (
+            "Top-down heatmap only supports single instance. Got invalid "
+            f'shape of bbox_center {results["bbox_center"].shape}.'
+        )
 
-        center = results['bbox_center'][0]
-        scale = results['bbox_scale'][0]
-        if 'bbox_rotation' in results:
-            rot = results['bbox_rotation'][0]
+        has_rot = "bbox_rotation" in results
+
+        center = results["bbox_center"][0]
+        scale = results["bbox_scale"][0]
+        if has_rot:
+            rot = results["bbox_rotation"][0]
         else:
-            rot = 0.
+            rot = 0.0
 
-        img = results['img']
+        img = results["img"]
+
+        # Short path when bboxes are not rotated (most common case)
+        if not has_rot:
+            bbox_xyxy = bbox_cs2xyxy(center, scale)
+            bbox_x1, bbox_y1, bbox_x2, bbox_y2 = bbox_xyxy
+            bbox_x1, bbox_y1, bbox_x2, bbox_y2 = (
+                floor(bbox_x1),
+                floor(bbox_y1),
+                ceil(bbox_x2),
+                ceil(bbox_y2),
+            )
+            bbox_x1 = max(0, min(bbox_x1, img.shape[1]))
+            bbox_y1 = max(0, min(bbox_y1, img.shape[0]))
+            bbox_x2 = max(0, min(bbox_x2, img.shape[1]))
+            bbox_y2 = max(0, min(bbox_y2, img.shape[0]))
+
+            if isinstance(img, (list, tuple)):
+                img = [
+                    img[bbox_y1:bbox_y2, bbox_x1:bbox_x2] for img in img
+                ]
+                img = [
+                    cv2.resize(img, (int(w), int(h)), interpolation=cv2.INTER_LINEAR)
+                    for img in img
+                ]
+            elif isinstance(img, np.ndarray):
+                img = img[bbox_y1:bbox_y2, bbox_x1:bbox_x2]
+                img = cv2.resize(
+                    img, (int(w), int(h)), interpolation=cv2.INTER_LINEAR
+                )
+            elif isinstance(img, torch.Tensor):
+                img = img[bbox_y1:bbox_y2, bbox_x1:bbox_x2]
+                img = resize_pt(
+                    img.permute(2, 0, 1),
+                    size=(int(h), int(w)),
+                    interpolation=InterpolationMode.BILINEAR,
+                ).permute(1, 2, 0)
+
+            if results.get("keypoints", None) is not None:
+                if results.get("transformed_keypoints", None) is not None:
+                    transformed_keypoints = results["transformed_keypoints"].copy()
+                else:
+                    transformed_keypoints = results["keypoints"].copy()
+                # Only transform (x, y) coordinates
+                transformed_keypoints[..., 0] = results["keypoints"][..., 0] - bbox_x1
+                transformed_keypoints[..., 1] = results["keypoints"][..., 1] - bbox_y1
+                results["transformed_keypoints"] = transformed_keypoints
+            else:
+                results["transformed_keypoints"] = np.zeros([])
+                results["keypoints_visible"] = np.ones((1, 1, 1))
+
+            results["img"] = img
+            results["input_size"] = (w, h)
+            results["input_center"] = center
+            results["input_scale"] = scale
+            return results
 
         if isinstance(img, np.ndarray) or is_seq_of(img, np.ndarray):
             if self.use_udp:
-                warp_mat = get_udp_warp_matrix(
-                    center, scale, rot, output_size=(w, h))
+                warp_mat = get_udp_warp_matrix(center, scale, rot, output_size=(w, h))
             else:
                 warp_mat = get_warp_matrix(center, scale, rot, output_size=(w, h))
 
-            if isinstance(results['img'], (list, tuple)):
-                results['img'] = [
-                    cv2.warpAffine(
-                        img, warp_mat, warp_size, flags=cv2.INTER_LINEAR)
-                    for img in results['img']
+            if isinstance(results["img"], (list, tuple)):
+                results["img"] = [
+                    cv2.warpAffine(img, warp_mat, warp_size, flags=cv2.INTER_LINEAR)
+                    for img in results["img"]
                 ]
             else:
-                results['img'] = cv2.warpAffine(
-                    results['img'], warp_mat, warp_size, flags=cv2.INTER_LINEAR)
-                
+                results["img"] = cv2.warpAffine(
+                    results["img"], warp_mat, warp_size, flags=cv2.INTER_LINEAR
+                )
+
         elif isinstance(img, torch.Tensor) or is_seq_of(img, torch.Tensor):
-            
+
             device = img.device if isinstance(img, torch.Tensor) else img[0].device
             center = torch.as_tensor(center, device=device)
             scale = torch.as_tensor(scale, device=device)
 
             if self.use_udp:
                 warp_mat = get_udp_warp_matrix_pt(
-                    center, scale, rot, output_size=(w, h))
+                    center, scale, rot, output_size=(w, h)
+                )
             else:
                 warp_mat = get_warp_matrix_pt(center, scale, rot, output_size=(w, h))
 
-            if isinstance(results['img'], (list, tuple)):
-                results['img'] = [
+            if isinstance(results["img"], (list, tuple)):
+                results["img"] = [
                     warp_affine_pt(
                         img.permute(2, 0, 1),
                         affine_mtx=warp_mat,
                         dst_size=warp_size[::-1],
-                        interpolation="bilinear"
+                        interpolation="bilinear",
                     ).permute(1, 2, 0)
-                    for img in results['img']
+                    for img in results["img"]
                 ]
             else:
-                results['img'] = warp_affine_pt(
-                    results['img'].permute(2, 0, 1),
+                results["img"] = warp_affine_pt(
+                    results["img"].permute(2, 0, 1),
                     affine_mtx=warp_mat,
                     dst_size=warp_size[::-1],
-                    interpolation="bilinear"
+                    interpolation="bilinear",
                 ).permute(1, 2, 0)
-        
+
             center = center.cpu().numpy()
             scale = scale.cpu().numpy()
 
-        if results.get('keypoints', None) is not None:
-            if results.get('transformed_keypoints', None) is not None:
-                transformed_keypoints = results['transformed_keypoints'].copy()
+        if results.get("keypoints", None) is not None:
+            if results.get("transformed_keypoints", None) is not None:
+                transformed_keypoints = results["transformed_keypoints"].copy()
             else:
-                transformed_keypoints = results['keypoints'].copy()
+                transformed_keypoints = results["keypoints"].copy()
             # Only transform (x, y) coordinates
             transformed_keypoints[..., :2] = cv2.transform(
-                results['keypoints'][..., :2], warp_mat)
-            results['transformed_keypoints'] = transformed_keypoints
+                results["keypoints"][..., :2], warp_mat
+            )
+            results["transformed_keypoints"] = transformed_keypoints
         else:
-            results['transformed_keypoints'] = np.zeros([])
-            results['keypoints_visible'] = np.ones((1, 1, 1))
+            results["transformed_keypoints"] = np.zeros([])
+            results["keypoints_visible"] = np.ones((1, 1, 1))
 
-        results['input_size'] = (w, h)
-        results['input_center'] = center
-        results['input_scale'] = scale
+        results["input_size"] = (w, h)
+        results["input_center"] = center
+        results["input_scale"] = scale
 
         return results
 
@@ -180,6 +251,6 @@ class TopdownAffine(BaseTransform):
             str: Formatted string.
         """
         repr_str = self.__class__.__name__
-        repr_str += f'(input_size={self.input_size}, '
-        repr_str += f'use_udp={self.use_udp})'
+        repr_str += f"(input_size={self.input_size}, "
+        repr_str += f"use_udp={self.use_udp})"
         return repr_str
