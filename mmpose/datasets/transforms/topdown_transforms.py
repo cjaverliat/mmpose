@@ -55,9 +55,9 @@ class TopdownAffine(BaseTransform):
     def __init__(self, input_size: Tuple[int, int], use_udp: bool = False) -> None:
         super().__init__()
 
-        assert (
-            is_seq_of(input_size, int) and len(input_size) == 2
-        ), f"Invalid input_size {input_size}"
+        assert is_seq_of(input_size, int) and len(input_size) == 2, (
+            f"Invalid input_size {input_size}"
+        )
 
         self.input_size = input_size
         self.use_udp = use_udp
@@ -105,7 +105,7 @@ class TopdownAffine(BaseTransform):
         # TODO: support multi-instance
         assert results["bbox_center"].shape[0] == 1, (
             "Top-down heatmap only supports single instance. Got invalid "
-            f'shape of bbox_center {results["bbox_center"].shape}.'
+            f"shape of bbox_center {results['bbox_center'].shape}."
         )
 
         has_rot = "bbox_rotation" in results
@@ -129,14 +129,30 @@ class TopdownAffine(BaseTransform):
                 ceil(bbox_x2),
                 ceil(bbox_y2),
             )
-            bbox_x1 = max(0, min(bbox_x1, img.shape[1]))
-            bbox_y1 = max(0, min(bbox_y1, img.shape[0]))
-            bbox_x2 = max(0, min(bbox_x2, img.shape[1]))
-            bbox_y2 = max(0, min(bbox_y2, img.shape[0]))
+
+            pad_left = abs(bbox_x1) if bbox_x1 < 0 else 0
+            pad_right = bbox_x2 - img.shape[1] if bbox_x2 > img.shape[1] else 0
+            pad_top = abs(bbox_y1) if bbox_y1 < 0 else 0
+            pad_bottom = bbox_y2 - img.shape[0] if bbox_y2 > img.shape[0] else 0
+
+            bbox_x1 = max(bbox_x1, 0)
+            bbox_y1 = max(bbox_y1, 0)
+            bbox_x2 = min(bbox_x2, img.shape[1])
+            bbox_y2 = min(bbox_y2, img.shape[0])
 
             if isinstance(img, (list, tuple)):
+                img = [img[bbox_y1:bbox_y2, bbox_x1:bbox_x2] for img in img]
                 img = [
-                    img[bbox_y1:bbox_y2, bbox_x1:bbox_x2] for img in img
+                    cv2.copyMakeBorder(
+                        img,
+                        pad_top,
+                        pad_bottom,
+                        pad_left,
+                        pad_right,
+                        cv2.BORDER_CONSTANT,
+                        value=0,
+                    )
+                    for img in img
                 ]
                 img = [
                     cv2.resize(img, (int(w), int(h)), interpolation=cv2.INTER_LINEAR)
@@ -144,11 +160,24 @@ class TopdownAffine(BaseTransform):
                 ]
             elif isinstance(img, np.ndarray):
                 img = img[bbox_y1:bbox_y2, bbox_x1:bbox_x2]
-                img = cv2.resize(
-                    img, (int(w), int(h)), interpolation=cv2.INTER_LINEAR
+                img = cv2.copyMakeBorder(
+                    img,
+                    pad_top,
+                    pad_bottom,
+                    pad_left,
+                    pad_right,
+                    cv2.BORDER_CONSTANT,
+                    value=0,
                 )
+                img = cv2.resize(img, (int(w), int(h)), interpolation=cv2.INTER_LINEAR)
             elif isinstance(img, torch.Tensor):
                 img = img[bbox_y1:bbox_y2, bbox_x1:bbox_x2]
+                img = torch.nn.functional.pad(
+                    img.permute(2, 0, 1),
+                    pad=(pad_left, pad_right, pad_top, pad_bottom),
+                    mode="constant",
+                    value=0,
+                ).permute(1, 2, 0)
                 img = resize_pt(
                     img.permute(2, 0, 1),
                     size=(int(h), int(w)),
@@ -191,7 +220,6 @@ class TopdownAffine(BaseTransform):
                 )
 
         elif isinstance(img, torch.Tensor) or is_seq_of(img, torch.Tensor):
-
             device = img.device if isinstance(img, torch.Tensor) else img[0].device
             center = torch.as_tensor(center, device=device)
             scale = torch.as_tensor(scale, device=device)
@@ -241,7 +269,6 @@ class TopdownAffine(BaseTransform):
         results["input_size"] = (w, h)
         results["input_center"] = center
         results["input_scale"] = scale
-
         return results
 
     def __repr__(self) -> str:
